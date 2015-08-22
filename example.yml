@@ -1,0 +1,14 @@
+zones:
+  bracewel.net:
+    a:
+      - 1.1.1.1
+    aaaa:
+      - FF01:0:0:0:0:0:0:FB
+    caa:
+      - 0
+      - issue
+      - letsencrypt.org
+
+  other.com:
+    mx:
+      - mail.other.com
