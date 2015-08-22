@@ -12,16 +12,15 @@ zones:
   bracewel.net:
     a:
       - 1.1.1.1
+      - 2.2.2.2
     aaaa:
       - FF01:0:0:0:0:0:0:FB
     caa:
-      - 0
-      - issue
-      - letsencrypt.org
+      - 0 issue "letsencrypt.org"
 
   other.com:
     mx:
-      - mail.other.com
+      - 10 mail.other.com
 ```
 *-- This idea probably won't entire work --*
 
