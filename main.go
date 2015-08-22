@@ -1,17 +1,20 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"net"
+	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
-
-	"gopkg.in/yaml.v2"
 
 	"github.com/codegangsta/cli"
 	"github.com/miekg/dns"
+	"gopkg.in/yaml.v2"
 )
 
 type rawZones struct {
@@ -29,7 +32,7 @@ func constrcutZones(rz rawZones) (*zones, error) {
 	for host, records := range rz.Zones {
 		host = dns.Fqdn(host)
 		z.Zones[host] = make(map[uint16][]dns.RR)
-		// Always add generated SOA rr?
+		// Always add a generated SOA rr?
 		for typeStr, v := range records {
 			rType, present := dns.StringToType[strings.ToUpper(typeStr)]
 			if !present {
@@ -48,6 +51,7 @@ func constrcutZones(rz rawZones) (*zones, error) {
 }
 
 type workbench struct {
+	zMu         sync.RWMutex
 	z           *zones
 	name        string
 	bind        string
@@ -59,7 +63,11 @@ type workbench struct {
 	compression bool
 }
 
-func (wb *workbench) updateZones(nz zones) error {
+func (wb *workbench) reloadZones(nz *zones) error {
+	wb.zMu.Lock()
+	defer wb.zMu.Unlock()
+	wb.z = nz
+	fmt.Printf("[dns-wb] Reloaded zone definitions, now serving %d zones\n", len(wb.z.Zones))
 	return nil
 }
 
@@ -70,7 +78,9 @@ func (wb *workbench) dnsHandler(w dns.ResponseWriter, r *dns.Msg) {
 	m.Compress = wb.compression
 	for _, q := range r.Question {
 		fmt.Printf("[dns-wb] Recieved query for %s [%s]\n", q.Name, dns.TypeToString[q.Qtype])
+		wb.zMu.RLock()
 		allRecords, present := wb.z.Zones[q.Name]
+		wb.zMu.RUnlock()
 		if !present {
 			// NXDOMAIN
 			continue
@@ -92,7 +102,7 @@ func (wb *workbench) dnsHandler(w dns.ResponseWriter, r *dns.Msg) {
 	return
 }
 
-func (wb *workbench) serveWorkbench() {
+func (wb *workbench) serveWorkbench() error {
 	dns.HandleFunc(".", wb.dnsHandler)
 	server := &dns.Server{
 		Addr:         net.JoinHostPort(wb.bind, wb.port),
@@ -101,14 +111,46 @@ func (wb *workbench) serveWorkbench() {
 		WriteTimeout: wb.wTimeout,
 		IdleTimeout:  func() time.Duration { return wb.iTimeout },
 		NotifyStartedFunc: func() {
-			fmt.Printf("[dns-wb] Started listening on %s:%s, serving %d zones\n", wb.bind, wb.port, len(wb.z.Zones))
+			wb.zMu.RLock()
+			fmt.Printf("[dns-wb] DNS listening on %s:%s, serving %d zones\n", wb.bind, wb.port, len(wb.z.Zones))
+			wb.zMu.RUnlock()
 		},
 	}
 	err := server.ListenAndServe()
-	if err != nil {
-		fmt.Println(err)
+	return err
+}
+
+func sendError(err string, w http.ResponseWriter) {
+	w.WriteHeader(400)
+	w.Write([]byte(err))
+}
+
+func (wb *workbench) apiReload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		sendError("Method not supported", w)
 		return
 	}
+
+	var rz rawZones
+	body, err := ioutil.ReadAll(r.Body)
+	if err != nil {
+		sendError(err.Error(), w)
+		return
+	}
+	err = json.Unmarshal(body, &rz)
+	if err != nil {
+		sendError(err.Error(), w)
+		return
+	}
+
+	z, err := constrcutZones(rz)
+	if err != nil {
+		sendError(err.Error(), w)
+		return
+	}
+
+	wb.reloadZones(z)
+	return
 }
 
 func loadYAML(filename string) (rawZones, error) {
@@ -176,9 +218,8 @@ func main() {
 				var rz rawZones
 				var z *zones
 				var err error
-				rzFile := c.String("zone-file")
-				if rzFile != "" {
-					rz, err = loadYAML("example.yml")
+				if rzFile := c.String("zone-file"); rzFile != "" {
+					rz, err = loadYAML(rzFile)
 					if err != nil {
 						fmt.Println(err)
 						return
@@ -203,7 +244,19 @@ func main() {
 					iTimeout:    time.Second * 8,
 					compression: c.Bool("dns-compression"),
 				}
-				wb.serveWorkbench()
+				go func() {
+					http.HandleFunc("/api/reload", wb.apiReload)
+					fmt.Printf("[dns-wb] API listening on %s\n", c.String("api-uri"))
+					err := http.ListenAndServe(c.String("api-uri"), nil)
+					if err != nil {
+						fmt.Println(err)
+					}
+				}()
+				err = wb.serveWorkbench()
+				if err != nil {
+					fmt.Println(err)
+					return
+				}
 			},
 		},
 		{
@@ -222,7 +275,41 @@ func main() {
 			},
 			Action: func(c *cli.Context) {
 				// do something
-				fmt.Println(c.String("zone-file"))
+				if c.String("zone-file") == "" {
+					fmt.Println("I neeeeed this")
+					return
+				}
+				rz, err := loadYAML(c.String("zone-file"))
+				if err != nil {
+					fmt.Println(err)
+					return
+				}
+				rzJSON, err := json.Marshal(rz)
+				if err != nil {
+					fmt.Println(err)
+					return
+				}
+				fmt.Println(string(rzJSON))
+				// Send json to HTTP API and wait for success/errors
+				req, err := http.NewRequest("POST", fmt.Sprintf("http://%s/api/reload", c.String("api-uri")), bytes.NewBuffer(rzJSON))
+				req.Header.Set("Content-Type", "application/json")
+				client := &http.Client{}
+				resp, err := client.Do(req)
+				if err != nil {
+					fmt.Println(err)
+					return
+				}
+				defer resp.Body.Close()
+
+				if resp.StatusCode != 200 {
+					apiErr, err := ioutil.ReadAll(resp.Body)
+					if err != nil {
+						fmt.Println(err)
+						return
+					}
+					fmt.Println(apiErr)
+				}
+				fmt.Println("Succesesfully reloaded zones")
 			},
 		},
 	}

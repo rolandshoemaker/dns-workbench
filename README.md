@@ -1,7 +1,8 @@
 # DNS workbench
 
-A simple DNS workbench server written in Go, allows for quick loading and reloading
-of zone definitions, it's somewhat useful for DNS testing.
+A simple authoritative DNS workbench server written in Go, allows for quick loading
+and reloading of zone definitions, it's somewhat useful for DNS testing and other
+random things.
 
 ## Zone file
 
