@@ -17,26 +17,6 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
-func humanTime(seconds int) string {
-	nanos := time.Duration(seconds) * time.Second
-	hours := int(nanos / (time.Hour))
-	nanos %= time.Hour
-	minutes := int(nanos / time.Minute)
-	nanos %= time.Minute
-	seconds = int(nanos / time.Second)
-	s := ""
-	if hours > 0 {
-		s += fmt.Sprintf("%d hours ", hours)
-	}
-	if minutes > 0 {
-		s += fmt.Sprintf("%d minutes ", minutes)
-	}
-	if seconds >= 0 {
-		s += fmt.Sprintf("%d seconds ", seconds)
-	}
-	return s
-}
-
 type rawZones struct {
 	// so horribly gross but w/e for now
 	Zones map[string]map[string]map[string][]string `yaml:"zones"`
@@ -45,7 +25,7 @@ type rawZones struct {
 type zones map[string]map[uint16][]dns.RR
 type auth map[string]*dns.RR
 
-func constrcutZones(rz rawZones, serverName string) (zones, error) {
+func constrcutZones(rz rawZones, serverName string) (zones, auth, error) {
 	a := make(auth)
 	z := make(zones)
 	for zoneName, hosts := range rz.Zones {
@@ -53,7 +33,7 @@ func constrcutZones(rz rawZones, serverName string) (zones, error) {
 		// Always add a generated SOA rr to a sep?
 		soa, err := dns.NewRR(fmt.Sprintf("%s SOA %s dns.%s  %s 10000 2400 604800 3600", zoneName, serverName, serverName, time.Now().Format("0601021504")))
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		z[zoneName] = map[uint16][]dns.RR{
 			dns.TypeSOA: []dns.RR{soa},
@@ -62,7 +42,7 @@ func constrcutZones(rz rawZones, serverName string) (zones, error) {
 		authRR, err := dns.NewRR(fmt.Sprintf("%s NS %s", zoneName, serverName))
 		if err != nil {
 			fmt.Printf("Failed to create authority NS record: %v\n", err)
-			return nil, err
+			return nil, nil, err
 		}
 
 		for host, records := range hosts {
@@ -74,12 +54,12 @@ func constrcutZones(rz rawZones, serverName string) (zones, error) {
 			for typeStr, v := range records {
 				rType, present := dns.StringToType[strings.ToUpper(typeStr)]
 				if !present {
-					return nil, fmt.Errorf("Invalid record type")
+					return nil, nil, fmt.Errorf("Invalid record type")
 				}
 				for _, presentation := range v {
 					rr, err := dns.NewRR(fmt.Sprintf("%s %s %s", host, strings.ToUpper(typeStr), presentation))
 					if err != nil {
-						return nil, fmt.Errorf("Couldn't parse record: %v", err)
+						return nil, nil, fmt.Errorf("Couldn't parse record: %v", err)
 					}
 					z[host][rType] = append(z[host][rType], rr)
 					a[host] = &authRR
@@ -88,7 +68,7 @@ func constrcutZones(rz rawZones, serverName string) (zones, error) {
 		}
 
 	}
-	return z, nil
+	return z, a, nil
 }
 
 type workbench struct {
@@ -106,10 +86,11 @@ type workbench struct {
 	compression bool
 }
 
-func (wb *workbench) reloadZones(nz zones) error {
+func (wb *workbench) reloadZones(nz zones, na auth) error {
 	wb.mu.Lock()
 	defer wb.mu.Unlock()
 	wb.z = nz
+	wb.a = na
 	return nil
 }
 
@@ -128,12 +109,9 @@ func (wb *workbench) dnsHandler(w dns.ResponseWriter, r *dns.Msg) {
 			continue
 		}
 		m.Authoritative = true
-		authRR, err := dns.NewRR(fmt.Sprintf("%s NS %s", q.Name, wb.name))
-		if err != nil {
-			fmt.Printf("Failed to create authority NS record: %v\n", err)
-			continue
+		if soa, present := wb.a[q.Name]; present {
+			m.Ns = append(m.Ns, *soa)
 		}
-		m.Ns = append(m.Ns, authRR)
 		qRecords, present := allRecords[q.Qtype]
 		if !present {
 			continue
@@ -154,8 +132,8 @@ func (wb *workbench) serveWorkbench() error {
 		IdleTimeout:  func() time.Duration { return wb.iTimeout },
 		NotifyStartedFunc: func() {
 			wb.mu.RLock()
+			defer wb.mu.RUnlock()
 			fmt.Printf("[dns-wb] DNS listening on %s:%s, serving %d zones\n", wb.bind, wb.port, len(wb.z))
-			wb.mu.RUnlock()
 		},
 	}
 	err := server.ListenAndServe()
@@ -186,13 +164,13 @@ func (wb *workbench) apiReload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	z, err := constrcutZones(rz, wb.name)
+	z, a, err := constrcutZones(rz, wb.name)
 	if err != nil {
 		sendError(err.Error(), w)
 		return
 	}
 
-	wb.reloadZones(z)
+	wb.reloadZones(z, a)
 
 	wb.mu.RLock()
 	defer wb.mu.RUnlock()
@@ -263,6 +241,7 @@ func main() {
 			Action: func(c *cli.Context) {
 				var rz rawZones
 				var z zones
+				var a auth
 				var err error
 				if rzFile := c.String("zone-file"); rzFile != "" {
 					rz, err = loadYAML(rzFile)
@@ -270,17 +249,19 @@ func main() {
 						fmt.Println(err)
 						return
 					}
-					z, err = constrcutZones(rz, dns.Fqdn(c.String("dns-name")))
+					z, a, err = constrcutZones(rz, dns.Fqdn(c.String("dns-name")))
 					if err != nil {
 						fmt.Println(err)
 						return
 					}
 				} else {
 					z = make(zones)
+					a = make(auth)
 				}
 
 				wb := workbench{
 					z:           z,
+					a:           a,
 					name:        dns.Fqdn(c.String("dns-name")),
 					bind:        c.String("dns-address"),
 					port:        c.String("dns-port"),
