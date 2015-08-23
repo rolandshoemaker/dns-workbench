@@ -84,7 +84,7 @@ This can be done manually or by using the `dns-workbench` binary like so
 $ dns-workbench reload --zone-file new-zones.yml
 ```
 
-Loading a new zone file will remove any previous definitions, so
+Loading a new zone file will replace any previous definitions.
 
 ## Building
 

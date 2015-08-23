@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -30,7 +31,6 @@ func constrcutZones(rz rawZones, serverName string) (zones, auth, error) {
 	z := make(zones)
 	for zoneName, hosts := range rz.Zones {
 		zoneName = dns.Fqdn(zoneName)
-		// Always add a generated SOA rr to a sep?
 		soa, err := dns.NewRR(fmt.Sprintf("%s SOA %s dns.%s  %s 10000 2400 604800 3600", zoneName, serverName, serverName, time.Now().Format("0601021504")))
 		if err != nil {
 			return nil, nil, err
@@ -41,8 +41,7 @@ func constrcutZones(rz rawZones, serverName string) (zones, auth, error) {
 
 		authRR, err := dns.NewRR(fmt.Sprintf("%s NS %s", zoneName, serverName))
 		if err != nil {
-			fmt.Printf("Failed to create authority NS record: %v\n", err)
-			return nil, nil, err
+			return nil, nil, fmt.Errorf("Failed to create authority NS record: %v", err)
 		}
 
 		for host, records := range hosts {
@@ -56,6 +55,7 @@ func constrcutZones(rz rawZones, serverName string) (zones, auth, error) {
 				if !present {
 					return nil, nil, fmt.Errorf("Invalid record type")
 				}
+
 				for _, presentation := range v {
 					rr, err := dns.NewRR(fmt.Sprintf("%s %s %s", host, strings.ToUpper(typeStr), presentation))
 					if err != nil {
@@ -66,7 +66,6 @@ func constrcutZones(rz rawZones, serverName string) (zones, auth, error) {
 				}
 			}
 		}
-
 	}
 	return z, a, nil
 }
@@ -75,6 +74,8 @@ type workbench struct {
 	mu sync.RWMutex
 	z  zones
 	a  auth
+
+	l *log.Logger
 
 	name        string
 	bind        string
@@ -102,7 +103,7 @@ func (wb *workbench) dnsHandler(w dns.ResponseWriter, r *dns.Msg) {
 	m.SetReply(r)
 	m.Compress = wb.compression
 	for _, q := range r.Question {
-		fmt.Printf("[dns-wb] Recieved query for [%s] %s\n", dns.TypeToString[q.Qtype], q.Name)
+		wb.l.Printf("Recieved query for [%s] %s\n", dns.TypeToString[q.Qtype], q.Name)
 		allRecords, present := wb.z[q.Name]
 		if !present {
 			// NXDOMAIN
@@ -137,7 +138,7 @@ func (wb *workbench) serveWorkbench() error {
 		NotifyStartedFunc: func() {
 			wb.mu.RLock()
 			defer wb.mu.RUnlock()
-			fmt.Printf("[dns-wb] DNS listening on %s:%s, serving %d zones\n", wb.bind, wb.port, len(wb.z))
+			wb.l.Printf("DNS listening on %s:%s, serving %d zones\n", wb.bind, wb.port, len(wb.z))
 		},
 	}
 	err := server.ListenAndServe()
@@ -178,7 +179,7 @@ func (wb *workbench) apiReload(w http.ResponseWriter, r *http.Request) {
 
 	wb.mu.RLock()
 	defer wb.mu.RUnlock()
-	fmt.Printf("[dns-wb] Reloaded zone definitions, now serving %d zones, took %s\n", len(wb.z), time.Since(rStart))
+	wb.l.Printf("Reloaded zone definitions, now serving %d zones, took %s\n", len(wb.z), time.Since(rStart))
 }
 
 func loadYAML(filename string) (rawZones, error) {
@@ -247,30 +248,27 @@ func main() {
 				var z zones
 				var a auth
 				var err error
+
+				logger := log.New(os.Stdout, "[dns-wb] ", log.Flags())
+
 				if rzFile := c.String("zone-file"); rzFile != "" {
 					rz, err = loadYAML(rzFile)
 					if err != nil {
-						fmt.Println(err)
-						return
+						logger.Fatalf("Failed to read zone file: %s\n", err)
 					}
 					z, a, err = constrcutZones(rz, dns.Fqdn(c.String("dns-name")))
 					if err != nil {
-						fmt.Println(err)
-						return
+						logger.Fatalf("Failed to parse zone file: %s\n", err)
 					}
 				} else {
 					z = make(zones)
 					a = make(auth)
 				}
 
-				for _, rr := range z {
-					for _, r := range rr {
-						fmt.Println(r)
-					}
-				}
 				wb := workbench{
 					z:           z,
 					a:           a,
+					l:           logger,
 					name:        dns.Fqdn(c.String("dns-name")),
 					bind:        c.String("dns-address"),
 					port:        c.String("dns-port"),
@@ -282,16 +280,17 @@ func main() {
 				}
 				go func() {
 					http.HandleFunc("/api/reload", wb.apiReload)
-					fmt.Printf("[dns-wb] API listening on %s\n", c.String("api-uri"))
+					logger.Printf("API listening on %s\n", c.String("api-uri"))
 					err := http.ListenAndServe(c.String("api-uri"), nil)
 					if err != nil {
-						fmt.Println(err)
+						logger.Printf("HTTP API crashed: %s\n", err)
+						// Dont' exit
 					}
 				}()
 				err = wb.serveWorkbench()
 				if err != nil {
-					fmt.Println(err)
-					return
+					logger.Fatalf("DNS server crashed: %s\n", err)
+					os.Exit(1)
 				}
 			},
 		},
@@ -310,41 +309,38 @@ func main() {
 				},
 			},
 			Action: func(c *cli.Context) {
-				// do something
+				logger := log.New(os.Stdout, "[dns-wb] ", log.Flags())
+
 				if c.String("zone-file") == "" {
-					fmt.Println("I neeeeed this")
-					return
+					logger.Fatalf("Zone file option is required\n")
 				}
 				rz, err := loadYAML(c.String("zone-file"))
 				if err != nil {
-					fmt.Println(err)
-					return
+					logger.Fatalf("Failed to load zone file: %s\n", err)
 				}
 				rzJSON, err := json.Marshal(rz)
 				if err != nil {
-					fmt.Println(err)
-					return
+					logger.Fatalf("Failed to marshal zone file to JSON: %s\n", err)
 				}
 				req, err := http.NewRequest("POST", fmt.Sprintf("http://%s/api/reload", c.String("api-uri")), bytes.NewBuffer(rzJSON))
 				req.Header.Set("Content-Type", "application/json")
 				client := &http.Client{}
 				resp, err := client.Do(req)
 				if err != nil {
-					fmt.Println(err)
-					return
+					logger.Fatalf("Failed to send update: %s\n", err)
 				}
 				defer resp.Body.Close()
 
 				if resp.StatusCode != 200 {
 					apiErr, err := ioutil.ReadAll(resp.Body)
 					if err != nil {
-						fmt.Println(err)
+						logger.Fatalf("Failed to read response body: %s\n", err)
 						return
 					}
-					fmt.Println(apiErr)
+					logger.Fatalf("Failed to reload zones: %s\n", apiErr)
 					return
 				}
-				fmt.Println("Succesesfully reloaded zones")
+				logger.Printf("Succesesfully reloaded zones\n")
 			},
 		},
 	}
