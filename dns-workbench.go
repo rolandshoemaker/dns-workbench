@@ -263,6 +263,11 @@ func main() {
 					a = make(auth)
 				}
 
+				for _, rr := range z {
+					for _, r := range rr {
+						fmt.Println(r)
+					}
+				}
 				wb := workbench{
 					z:           z,
 					a:           a,
