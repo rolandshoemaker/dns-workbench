@@ -17,42 +17,85 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
-type rawZones struct {
-	Zones map[string]map[string][]string `yaml:"zones"`
-}
-
-type zones struct {
-	Zones map[string]map[uint16][]dns.RR
-}
-
-func constrcutZones(rz rawZones) (*zones, error) {
-	z := zones{
-		Zones: make(map[string]map[uint16][]dns.RR),
+func humanTime(seconds int) string {
+	nanos := time.Duration(seconds) * time.Second
+	hours := int(nanos / (time.Hour))
+	nanos %= time.Hour
+	minutes := int(nanos / time.Minute)
+	nanos %= time.Minute
+	seconds = int(nanos / time.Second)
+	s := ""
+	if hours > 0 {
+		s += fmt.Sprintf("%d hours ", hours)
 	}
-	for host, records := range rz.Zones {
-		host = dns.Fqdn(host)
-		z.Zones[host] = make(map[uint16][]dns.RR)
-		// Always add a generated SOA rr?
-		for typeStr, v := range records {
-			rType, present := dns.StringToType[strings.ToUpper(typeStr)]
-			if !present {
-				return nil, fmt.Errorf("Invalid record type")
+	if minutes > 0 {
+		s += fmt.Sprintf("%d minutes ", minutes)
+	}
+	if seconds >= 0 {
+		s += fmt.Sprintf("%d seconds ", seconds)
+	}
+	return s
+}
+
+type rawZones struct {
+	// so horribly gross but w/e for now
+	Zones map[string]map[string]map[string][]string `yaml:"zones"`
+}
+
+type zones map[string]map[uint16][]dns.RR
+type auth map[string]*dns.RR
+
+func constrcutZones(rz rawZones, serverName string) (zones, error) {
+	a := make(auth)
+	z := make(zones)
+	for zoneName, hosts := range rz.Zones {
+		zoneName = dns.Fqdn(zoneName)
+		// Always add a generated SOA rr to a sep?
+		soa, err := dns.NewRR(fmt.Sprintf("%s SOA %s dns.%s  %s 10000 2400 604800 3600", zoneName, serverName, serverName, time.Now().Format("0601021504")))
+		if err != nil {
+			return nil, err
+		}
+		z[zoneName] = map[uint16][]dns.RR{
+			dns.TypeSOA: []dns.RR{soa},
+		}
+
+		authRR, err := dns.NewRR(fmt.Sprintf("%s NS %s", zoneName, serverName))
+		if err != nil {
+			fmt.Printf("Failed to create authority NS record: %v\n", err)
+			return nil, err
+		}
+
+		for host, records := range hosts {
+			host = dns.Fqdn(host)
+			if _, present := z[host]; !present {
+				z[host] = make(map[uint16][]dns.RR)
 			}
-			for _, presentation := range v {
-				rr, err := dns.NewRR(fmt.Sprintf("%s %s %s", host, strings.ToUpper(typeStr), presentation))
-				if err != nil {
-					return nil, fmt.Errorf("Couldn't parse record: %v", err)
+
+			for typeStr, v := range records {
+				rType, present := dns.StringToType[strings.ToUpper(typeStr)]
+				if !present {
+					return nil, fmt.Errorf("Invalid record type")
 				}
-				z.Zones[host][rType] = append(z.Zones[host][rType], rr)
+				for _, presentation := range v {
+					rr, err := dns.NewRR(fmt.Sprintf("%s %s %s", host, strings.ToUpper(typeStr), presentation))
+					if err != nil {
+						return nil, fmt.Errorf("Couldn't parse record: %v", err)
+					}
+					z[host][rType] = append(z[host][rType], rr)
+					a[host] = &authRR
+				}
 			}
 		}
+
 	}
-	return &z, nil
+	return z, nil
 }
 
 type workbench struct {
-	zMu         sync.RWMutex
-	z           *zones
+	mu sync.RWMutex
+	z  zones
+	a  auth
+
 	name        string
 	bind        string
 	port        string
@@ -63,24 +106,23 @@ type workbench struct {
 	compression bool
 }
 
-func (wb *workbench) reloadZones(nz *zones) error {
-	wb.zMu.Lock()
-	defer wb.zMu.Unlock()
+func (wb *workbench) reloadZones(nz zones) error {
+	wb.mu.Lock()
+	defer wb.mu.Unlock()
 	wb.z = nz
-	fmt.Printf("[dns-wb] Reloaded zone definitions, now serving %d zones\n", len(wb.z.Zones))
 	return nil
 }
 
 func (wb *workbench) dnsHandler(w dns.ResponseWriter, r *dns.Msg) {
+	wb.mu.RLock()
+	defer wb.mu.RUnlock()
 	defer w.Close()
 	m := new(dns.Msg)
 	m.SetReply(r)
 	m.Compress = wb.compression
 	for _, q := range r.Question {
 		fmt.Printf("[dns-wb] Recieved query for %s [%s]\n", q.Name, dns.TypeToString[q.Qtype])
-		wb.zMu.RLock()
-		allRecords, present := wb.z.Zones[q.Name]
-		wb.zMu.RUnlock()
+		allRecords, present := wb.z[q.Name]
 		if !present {
 			// NXDOMAIN
 			continue
@@ -111,9 +153,9 @@ func (wb *workbench) serveWorkbench() error {
 		WriteTimeout: wb.wTimeout,
 		IdleTimeout:  func() time.Duration { return wb.iTimeout },
 		NotifyStartedFunc: func() {
-			wb.zMu.RLock()
-			fmt.Printf("[dns-wb] DNS listening on %s:%s, serving %d zones\n", wb.bind, wb.port, len(wb.z.Zones))
-			wb.zMu.RUnlock()
+			wb.mu.RLock()
+			fmt.Printf("[dns-wb] DNS listening on %s:%s, serving %d zones\n", wb.bind, wb.port, len(wb.z))
+			wb.mu.RUnlock()
 		},
 	}
 	err := server.ListenAndServe()
@@ -131,6 +173,7 @@ func (wb *workbench) apiReload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	rStart := time.Now()
 	var rz rawZones
 	body, err := ioutil.ReadAll(r.Body)
 	if err != nil {
@@ -143,14 +186,17 @@ func (wb *workbench) apiReload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	z, err := constrcutZones(rz)
+	z, err := constrcutZones(rz, wb.name)
 	if err != nil {
 		sendError(err.Error(), w)
 		return
 	}
 
 	wb.reloadZones(z)
-	return
+
+	wb.mu.RLock()
+	defer wb.mu.RUnlock()
+	fmt.Printf("[dns-wb] Reloaded zone definitions, now serving %d zones, took %s\n", len(wb.z), time.Since(rStart))
 }
 
 func loadYAML(filename string) (rawZones, error) {
@@ -216,7 +262,7 @@ func main() {
 			},
 			Action: func(c *cli.Context) {
 				var rz rawZones
-				var z *zones
+				var z zones
 				var err error
 				if rzFile := c.String("zone-file"); rzFile != "" {
 					rz, err = loadYAML(rzFile)
@@ -224,13 +270,13 @@ func main() {
 						fmt.Println(err)
 						return
 					}
-					z, err = constrcutZones(rz)
+					z, err = constrcutZones(rz, dns.Fqdn(c.String("dns-name")))
 					if err != nil {
 						fmt.Println(err)
 						return
 					}
 				} else {
-					z = &zones{Zones: make(map[string]map[uint16][]dns.RR)}
+					z = make(zones)
 				}
 
 				wb := workbench{
@@ -308,6 +354,7 @@ func main() {
 						return
 					}
 					fmt.Println(apiErr)
+					return
 				}
 				fmt.Println("Succesesfully reloaded zones")
 			},

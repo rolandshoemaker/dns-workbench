@@ -1,13 +1,33 @@
 zones:
   bracewel.net:
-    a:
-      - 1.1.1.1
-      - 2.2.2.2
-    aaaa:
-      - FF01:0:0:0:0:0:0:FB
-    caa:
-      - 0 issue "letsencrypt.org"
-
+    bracewel.net:
+      a:
+        - 1.1.1.1
+        - 2.2.2.2
+      aaaa:
+        - FF01:0:0:0:0:0:0:FB
+      caa:
+        - 0 issue "letsencrypt.org"
+      ns:
+        - 1.1.1.2
+        - 1.1.1.3
+        - 1.1.1.4
+        - 1.1.1.5
+    www.bracewel.net:
+      a:
+        - 1.1.1.1
+        - 2.2.2.2
+      aaaa:
+        - FF01:0:0:0:0:0:0:FB
+      ns:
+        - 1.1.1.2
+        - 1.1.1.3
+        - 1.1.1.4
+        - 1.1.1.5
   other.com:
-    mx:
-      - 10 mail.other.com
+    other.com:
+      mx:
+        - 10 mail.other.com
+    www.other.com:
+      a:
+        - 1.1.1.1
