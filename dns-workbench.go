@@ -12,9 +12,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/codegangsta/cli"
-	"github.com/miekg/dns"
-	"gopkg.in/yaml.v2"
+	"github.com/rolandshoemaker/dns-workbench/Godeps/_workspace/src/github.com/codegangsta/cli"
+	"github.com/rolandshoemaker/dns-workbench/Godeps/_workspace/src/github.com/miekg/dns"
+	"github.com/rolandshoemaker/dns-workbench/Godeps/_workspace/src/gopkg.in/yaml.v2"
 )
 
 type rawZones struct {
@@ -108,9 +108,9 @@ func (wb *workbench) dnsHandler(w dns.ResponseWriter, r *dns.Msg) {
 			// NXDOMAIN
 			continue
 		}
-		m.Authoritative = true
-		if soa, present := wb.a[q.Name]; present {
-			m.Ns = append(m.Ns, *soa)
+		if auth, present := wb.a[q.Name]; present {
+			m.Authoritative = true
+			m.Ns = append(m.Ns, *auth)
 		}
 		qRecords, present := allRecords[q.Qtype]
 		if !present {
@@ -118,6 +118,10 @@ func (wb *workbench) dnsHandler(w dns.ResponseWriter, r *dns.Msg) {
 		}
 		m.Answer = append(m.Answer, qRecords...)
 	}
+	if len(m.Answer) == 0 {
+		m.Rcode = dns.RcodeNameError
+	}
+
 	w.WriteMsg(m)
 	return
 }

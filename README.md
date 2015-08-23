@@ -1,12 +1,12 @@
 # `dns-workbench`
 
-A simple authoritative DNS workbench server written in Go, allows for quick loading
-and reloading of zone definitions, it's somewhat useful for DNS testing and other
-random things.
+A simple authoritative DNS workbench server written in Go that allows for quick loading
+and reloading of zone definitions. Because it can be setup and reconfigured extremely
+easily it's somewhat useful for testing and other random things.
 
 ## Zone file
 
-Uses YAML which can be loaded at runtime or via the HTTP API.
+Zone definition files use YAML and can be loaded at runtime or via the HTTP API.
 
 ```
 zones:
