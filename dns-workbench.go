@@ -102,7 +102,7 @@ func (wb *workbench) dnsHandler(w dns.ResponseWriter, r *dns.Msg) {
 	m.SetReply(r)
 	m.Compress = wb.compression
 	for _, q := range r.Question {
-		fmt.Printf("[dns-wb] Recieved query for %s [%s]\n", q.Name, dns.TypeToString[q.Qtype])
+		fmt.Printf("[dns-wb] Recieved query for [%s] %s\n", dns.TypeToString[q.Qtype], q.Name)
 		allRecords, present := wb.z[q.Name]
 		if !present {
 			// NXDOMAIN
@@ -316,8 +316,6 @@ func main() {
 					fmt.Println(err)
 					return
 				}
-				fmt.Println(string(rzJSON))
-				// Send json to HTTP API and wait for success/errors
 				req, err := http.NewRequest("POST", fmt.Sprintf("http://%s/api/reload", c.String("api-uri")), bytes.NewBuffer(rzJSON))
 				req.Header.Set("Content-Type", "application/json")
 				client := &http.Client{}
