@@ -102,27 +102,40 @@ func (wb *workbench) dnsHandler(w dns.ResponseWriter, r *dns.Msg) {
 	m := new(dns.Msg)
 	m.SetReply(r)
 	m.Compress = wb.compression
-	for _, q := range r.Question {
-		wb.l.Printf("Recieved query for [%s] %s\n", dns.TypeToString[q.Qtype], q.Name)
-		allRecords, present := wb.z[q.Name]
-		if !present {
-			// NXDOMAIN
-			continue
-		}
-		if auth, present := wb.a[q.Name]; present {
-			m.Authoritative = true
-			m.Ns = append(m.Ns, *auth)
-		}
-		qRecords, present := allRecords[q.Qtype]
-		if !present {
-			continue
-		}
-		m.Answer = append(m.Answer, qRecords...)
+
+	if len(r.Question) > 1 || r.Rcode != dns.OpcodeQuery {
+		m.Rcode = dns.RcodeNotImplemented
+	} else if len(r.Question) == 0 {
+		m.Rcode = dns.RcodeFormatError
 	}
-	if len(m.Answer) == 0 {
-		m.Rcode = dns.RcodeNameError
+	if m.Rcode == dns.RcodeFormatError || m.Rcode == dns.RcodeNotImplemented {
+		w.WriteMsg(m)
+		return
 	}
 
+	q := &r.Question[0]
+
+	wb.l.Printf("Recieved query for [%s] %s\n", dns.TypeToString[q.Qtype], q.Name)
+	allRecords, present := wb.z[q.Name]
+	if !present {
+		m.Rcode = dns.RcodeNameError
+		w.WriteMsg(m)
+		return
+	}
+
+	if auth, present := wb.a[q.Name]; present {
+		m.Authoritative = true
+		m.Ns = append(m.Ns, *auth)
+	}
+
+	qRecords, present := allRecords[q.Qtype]
+	if !present {
+		m.Rcode = dns.RcodeNXRrset
+		w.WriteMsg(m)
+		return
+	}
+
+	m.Answer = append(m.Answer, qRecords...)
 	w.WriteMsg(m)
 	return
 }
