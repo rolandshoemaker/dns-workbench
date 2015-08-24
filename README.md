@@ -2,8 +2,8 @@
 
 A simple authoritative DNS workbench server written in Go that allows for quick loading
 and reloading of zone definitions. Because it can be setup and reconfigured extremely
-easily it's somewhat useful for testing and other random things. Plus it's so easy
-easy to use, you don't need a degree from ISC!
+easily it's somewhat useful for testing and other random things, you don't need
+a degree from ISC!
 
 ## Zone file
 
