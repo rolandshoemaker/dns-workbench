@@ -115,7 +115,7 @@ func (wb *workbench) dnsHandler(w dns.ResponseWriter, r *dns.Msg) {
 
 	q := &r.Question[0]
 
-	wb.l.Printf("Recieved query for [%s] %s\n", dns.TypeToString[q.Qtype], q.Name)
+	wb.l.Printf("Received query for [%s] %s\n", dns.TypeToString[q.Qtype], q.Name)
 	allRecords, present := wb.z[q.Name]
 	if !present {
 		m.Rcode = dns.RcodeNameError
