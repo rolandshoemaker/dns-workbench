@@ -116,8 +116,24 @@ func (wb *workbench) dnsHandler(w dns.ResponseWriter, r *dns.Msg) {
 	q := &r.Question[0]
 
 	wb.l.Printf("Received query for [%s] %s\n", dns.TypeToString[q.Qtype], q.Name)
-	allRecords, present := wb.z[q.Name]
-	if !present {
+	
+	var allRecords map[uint16][]dns.RR
+	for zoneName, zone := range wb.z {
+		if zoneName == q.Name {
+			allRecords = zone
+			break
+		}
+		if strings.HasPrefix(zoneName, "*.") {
+			// lop off the leading host for comparison
+			nameParts := strings.SplitN(q.Name, ".", 2)
+			if len(nameParts) > 1 && zoneName == "*." + nameParts[1] {
+				allRecords = zone
+				break
+			}
+		}
+	}
+	
+	if allRecords == nil {
 		m.Rcode = dns.RcodeNameError
 		w.WriteMsg(m)
 		return
