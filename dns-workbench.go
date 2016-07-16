@@ -26,7 +26,7 @@ type rawZones struct {
 type zones map[string]map[uint16][]dns.RR
 type auth map[string]*dns.RR
 
-func constrcutZones(rz rawZones, serverName string) (zones, auth, error) {
+func constructZones(rz rawZones, serverName string) (zones, auth, error) {
 	a := make(auth)
 	z := make(zones)
 	for zoneName, hosts := range rz.Zones {
@@ -182,7 +182,7 @@ func (wb *workbench) apiReload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	z, a, err := constrcutZones(rz, wb.name)
+	z, a, err := constructZones(rz, wb.name)
 	if err != nil {
 		sendError(err.Error(), w)
 		return
@@ -269,7 +269,7 @@ func main() {
 					if err != nil {
 						logger.Fatalf("Failed to read zone file: %s\n", err)
 					}
-					z, a, err = constrcutZones(rz, dns.Fqdn(c.String("dns-name")))
+					z, a, err = constructZones(rz, dns.Fqdn(c.String("dns-name")))
 					if err != nil {
 						logger.Fatalf("Failed to parse zone file: %s\n", err)
 					}
@@ -353,7 +353,7 @@ func main() {
 					logger.Fatalf("Failed to reload zones: %s\n", apiErr)
 					return
 				}
-				logger.Printf("Succesesfully reloaded zones\n")
+				logger.Printf("Successfully reloaded zones\n")
 			},
 		},
 	}
